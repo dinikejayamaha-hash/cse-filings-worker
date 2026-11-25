@@ -1,0 +1,1 @@
+{"at": "2026-11-25T12:55:52+00:00", "run_id": "45618142443", "release": "b45618142443", "assets": 8, "done_total": 20, "pruned_releases": 0, "attempted": 20, "ok": 20, "final": 20, "retry": 0, "ocr_filings": 17, "requests": 20, "http_errors": 0, "by_kind": {}, "circuit_open": 0, "slowdowns": 0, "shard_seconds": 9, "error_rate": 0.0, "filings_per_hour": 8000}
