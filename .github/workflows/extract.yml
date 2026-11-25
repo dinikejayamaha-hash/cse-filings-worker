@@ -1,0 +1,103 @@
+name: Extract filing text
+# Triggers: schedule and manual dispatch only. Only the publish job can write (releases + state/), and it never
+# handles a PDF. Shards write nothing but age-encrypted batches and status manifests (no text) as 1-day artifacts.
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      max_items: { description: "Filings this run (all shards)", default: "3000" }
+      budget_minutes: { description: "Download/extract budget per shard (minutes)", default: "140" }
+concurrency:
+  group: extract
+  cancel-in-progress: false
+permissions:
+  contents: read
+env:
+  PYTHONUNBUFFERED: "1"
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: requirements.lock }
+      - run: pip install -q --require-hashes -r requirements.lock
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr age >/dev/null
+      - name: Lint and tests
+        run: python -m compileall -q worker tests && python -m pytest -q tests
+      - name: Worklist
+        id: plan
+        env:
+          MAX_ITEMS: ${{ inputs.max_items || '3000' }}
+        run: |
+          case "$MAX_ITEMS" in ''|*[!0-9]*) echo "::error::max_items must be a number"; exit 1;; esac
+          python -m worker plan --out worklist.json --max-items "$MAX_ITEMS"
+          echo "count=$(python -c 'import json;print(len(json.load(open("worklist.json"))))')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with: { name: worklist, path: worklist.json, retention-days: 1 }
+
+  shard:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 175
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: requirements.lock }
+      - run: pip install -q --require-hashes -r requirements.lock
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr age >/dev/null
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: worklist }
+      - name: Download, extract, encrypt
+        env:
+          BUDGET: ${{ inputs.budget_minutes || '140' }}
+          SHARD: ${{ matrix.shard }}
+          RUN_ID: ${{ github.run_id }}
+          OMP_THREAD_LIMIT: "1"
+        run: |
+          case "$BUDGET" in ''|*[!0-9.]*) echo "::error::budget_minutes must be a number"; exit 1;; esac
+          python -m worker shard --worklist worklist.json --index "$SHARD" --of 8 --budget-minutes "$BUDGET" \
+            --dist dist --run-id "$RUN_ID"
+          find dist -type f ! -name '*.tar.gz.age' ! -name 'manifest-*.json' -delete
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with: { name: "shard-${{ matrix.shard }}", path: dist/, retention-days: 1, if-no-files-found: ignore }
+
+  publish:
+    needs: [plan, shard]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: requirements.lock }
+      - run: pip install -q --require-hashes -r requirements.lock
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { pattern: "shard-*", path: dist }
+      - name: Release encrypted batches, prune releases older than 7 days, record done filings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          find dist -type f ! -name '*.tar.gz.age' ! -name 'manifest-*.json' -delete
+          python -m worker publish --dist dist --run-id "$RUN_ID"
+          git config user.name "github-actions[bot]"; git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/done.json state/runs.jsonl
+          git commit -qm "state: run $RUN_ID" || exit 0
+          for i in 1 2 3; do git pull -q --rebase origin main && git push -q origin HEAD:main && exit 0; sleep 5; done
+          exit 1

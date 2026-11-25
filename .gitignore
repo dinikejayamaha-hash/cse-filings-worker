@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+dist/
+work/
+worklist.json
+*.pdf
+*.tar.gz
+*.age

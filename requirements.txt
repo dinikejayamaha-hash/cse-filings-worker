@@ -1,0 +1,8 @@
+# Exact pins. Text extraction must stay byte-identical across runs: change pypdfium2 / pdfplumber / pytesseract /
+# pillow only deliberately. Workflows install the hash-locked requirements.lock (uv pip compile --generate-hashes).
+requests==2.34.2
+pypdfium2==5.15.2
+pdfplumber==0.11.11
+pytesseract==0.3.13
+pillow==13.0.0
+pytest==9.1.1
